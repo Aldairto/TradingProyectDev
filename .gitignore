@@ -1,0 +1,21 @@
+# Ignora archivos/carpeta de datos (excel, logs, órdenes, temporales)
+data/
+
+# Archivos de entorno y variables sensibles
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Archivos temporales, logs y outputs comunes
+*.log
+
+# Archivos de configuración o ambiente de VSCode (si no quieres compartir tu config local)
+.vscode/
+
+# Jupyter notebooks temporales (si los llegas a usar)
+*.ipynb_checkpoints/
+
+# Otros (ajusta según uses)
+.DS_Store
