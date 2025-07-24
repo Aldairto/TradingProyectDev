@@ -2,19 +2,12 @@ from flask import Flask, request, jsonify
 import requests
 import os
 import threading
-from dotenv import load_dotenv
-
-# Carga el .env si lo ejecutas localmente (en Railway no es necesario)
-load_dotenv()
 
 app = Flask(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-# Debug: Imprime variables para asegurarte que Railway las lee
-print("TELEGRAM_TOKEN:", TELEGRAM_TOKEN)
-print("CHAT_ID:", CHAT_ID)
+# Obtén las variables desde el entorno que te da Railway
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # Configuración de niveles TP y SL
 TPS = [0.2, 0.5, 1, 2, 3, 5]  # TP1-TP6 (%)
@@ -34,9 +27,14 @@ def calcular_tps_sl(price, tps, sl, side="buy"):
     return niveles
 
 def send_telegram_message(message: str):
+    # Asegúrate de que las variables existen
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("ERROR: Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID")
+        return {"ok": False, "error": "Missing TELEGRAM_TOKEN or CHAT_ID"}
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
-        "chat_id": CHAT_ID,
+        "chat_id": str(CHAT_ID),    # por si el chat_id es numérico, envíalo como string
         "text": message,
         "parse_mode": "HTML"
     }
@@ -49,34 +47,21 @@ def webhook():
     data = request.json
     print("Alerta recibida:", data)
 
-    signal_raw = data.get("signal", "").lower().strip()
-    price = data.get("price", 0)
-    try:
-        price = float(price)
-    except Exception as e:
-        print("Error al convertir price a float:", e)
-        price = 0
-    symbol = data.get("symbol", "???")
-
-    msg = None
-
-    if "posible buy" in signal_raw:
-        emoji = "🔵"
-        msg = f"""{emoji} <b>POSIBLE BUY</b> detectado en {symbol}
-• Precio observado: {price}
-(Revisa confirmación antes de operar)
-"""
-    elif "posible sell" in signal_raw:
-        emoji = "🟠"
-        msg = f"""{emoji} <b>POSIBLE SELL</b> detectado en {symbol}
-• Precio observado: {price}
-(Revisa confirmación antes de operar)
-"""
-    elif "buy" in signal_raw:
-        sl = SL_BUY
-        niveles = calcular_tps_sl(price, TPS, sl, "buy")
-        emoji = "📈"
-        msg = f"""{emoji} <b>COMPRA (BUY)</b> en {symbol}
+    if isinstance(data, dict):
+        side = data.get("signal", "").lower()
+        price = data.get("price", 0)
+        print("Campo 'price' recibido:", price, type(price))
+        try:
+            price = float(price)
+        except Exception as e:
+            print("Error al convertir price a float:", e)
+            price = 0
+        symbol = data.get("symbol", "???")
+        if price > 0 and side in ["buy", "sell"]:
+            sl = SL_BUY if side == "buy" else SL_SELL
+            niveles = calcular_tps_sl(price, TPS, sl, side)
+            emoji = "📈" if side == "buy" else "📉"
+            msg = f"""{emoji} Nueva señal Infinity Algo ({side.upper()}) en {symbol}
 • Precio de entrada: {price}
 • TP1: {niveles['TP1']}
 • TP2: {niveles['TP2']}
@@ -86,31 +71,21 @@ def webhook():
 • TP6: {niveles['TP6']}
 • SL: {niveles['SL']}
 """
-    elif "sell" in signal_raw:
-        sl = SL_SELL
-        niveles = calcular_tps_sl(price, TPS, sl, "sell")
-        emoji = "📉"
-        msg = f"""{emoji} <b>VENTA (SELL)</b> en {symbol}
-• Precio de entrada: {price}
-• TP1: {niveles['TP1']}
-• TP2: {niveles['TP2']}
-• TP3: {niveles['TP3']}
-• TP4: {niveles['TP4']}
-• TP5: {niveles['TP5']}
-• TP6: {niveles['TP6']}
-• SL: {niveles['SL']}
-"""
+        else:
+            msg = f"Alerta TradingView:\n{data}"
     else:
-        msg = f"Alerta TradingView:\n{data}"
+        # Si no es JSON, es texto plano
+        msg = f"Alerta TradingView (mensaje simple):\n{data}"
 
     threading.Thread(target=send_telegram_message, args=(msg,)).start()
     return jsonify({"status": "ok"})
 
-@app.route("/prueba_telegram", methods=["GET"])
-def prueba_telegram():
-    mensaje = "✅ <b>Prueba exitosa:</b> tu bot y variables de entorno funcionan correctamente."
-    response = send_telegram_message(mensaje)
-    return jsonify({"result": response})
+@app.route("/test_telegram")
+def test_telegram():
+    """Ruta simple para probar que Telegram envía mensaje."""
+    print("DEBUG: /test_telegram called")
+    result = send_telegram_message("Mensaje de prueba desde Railway ✔️")
+    return "Mensaje de prueba enviado (revisa logs y Telegram)\n" + str(result)
 
 if __name__ == "__main__":
     app.run(port=5000, host="0.0.0.0")
