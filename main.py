@@ -3,9 +3,14 @@ import requests
 import os
 import threading
 
+# No uses dotenv en Railway en producción: Railway ya inyecta las variables.
+# Si quieres usarlo local, puedes descomentar estas líneas:
+# from dotenv import load_dotenv
+# load_dotenv()
+
 app = Flask(__name__)
 
-# Obtén las variables desde el entorno que te da Railway
+# Lee variables de entorno directo del sistema
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -27,20 +32,22 @@ def calcular_tps_sl(price, tps, sl, side="buy"):
     return niveles
 
 def send_telegram_message(message: str):
-    # Asegúrate de que las variables existen
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print("ERROR: Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID")
-        return {"ok": False, "error": "Missing TELEGRAM_TOKEN or CHAT_ID"}
-
+        return None
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
-        "chat_id": str(CHAT_ID),    # por si el chat_id es numérico, envíalo como string
+        "chat_id": CHAT_ID,
         "text": message,
         "parse_mode": "HTML"
     }
-    r = requests.post(url, json=payload)
-    print("Respuesta de Telegram:", r.status_code, r.text)
-    return r.json()
+    try:
+        r = requests.post(url, json=payload)
+        print("Respuesta de Telegram:", r.status_code, r.text)
+        return r.json()
+    except Exception as e:
+        print("Error al enviar mensaje a Telegram:", e)
+        return None
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -80,12 +87,14 @@ def webhook():
     threading.Thread(target=send_telegram_message, args=(msg,)).start()
     return jsonify({"status": "ok"})
 
-@app.route("/test_telegram")
-def test_telegram():
-    """Ruta simple para probar que Telegram envía mensaje."""
-    print("DEBUG: /test_telegram called")
-    result = send_telegram_message("Mensaje de prueba desde Railway ✔️")
-    return "Mensaje de prueba enviado (revisa logs y Telegram)\n" + str(result)
+# Endpoint de prueba para variables de entorno (recuerda eliminarlo después)
+@app.route('/envtest')
+def envtest():
+    return f"TOKEN: {repr(TELEGRAM_TOKEN)} | CHAT_ID: {repr(CHAT_ID)}"
+
+@app.route("/")
+def index():
+    return "¡Bot de Trading activo! Versión Railway."
 
 if __name__ == "__main__":
     app.run(port=5000, host="0.0.0.0")
