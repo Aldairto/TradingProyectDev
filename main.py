@@ -4,8 +4,13 @@ import requests
 
 app = Flask(__name__)
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# Cargar variables de entorno de forma segura
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# DEBUG: Verifica si las variables llegan
+print("DEBUG >>> TELEGRAM_TOKEN vacío:", not bool(TELEGRAM_TOKEN))
+print("DEBUG >>> TELEGRAM_CHAT_ID vacío:", not bool(TELEGRAM_CHAT_ID))
 
 # Configuración de TP y SL (porcentaje)
 TPS = [0.2, 0.5, 1, 2, 3, 5]  # TP1 a TP6 (%)
@@ -27,7 +32,10 @@ def classify_signal(signal_text):
 
 def calcular_tps_sl(price, tps, sl, side="buy"):
     niveles = {}
-    price = float(price)
+    try:
+        price = float(price)
+    except Exception:
+        return niveles
     if side == "buy":
         for i, tp in enumerate(tps, 1):
             niveles[f"TP{i}"] = round(price * (1 + tp / 100), 2)
@@ -39,7 +47,6 @@ def calcular_tps_sl(price, tps, sl, side="buy"):
     return niveles
 
 def formato_tps_sl(niveles):
-    # Emoji para cada TP y SL para hacerlo más visual
     iconos = ["🎯", "🎯", "🎯", "🎯", "🎯", "🎯"]
     tp_lines = ""
     for i in range(1, 7):
@@ -48,6 +55,11 @@ def formato_tps_sl(niveles):
     return tp_lines
 
 def send_telegram_message(tipo, signal_raw, price, symbol, niveles=None):
+    # Validar que las variables están presentes
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("ERROR: Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID")
+        return
+
     tipo_map = {
         "CONFIRMADA_BUY": "🟢 COMPRA CONFIRMADA",
         "CONFIRMADA_SELL": "🔴 VENTA CONFIRMADA",
@@ -63,25 +75,20 @@ def send_telegram_message(tipo, signal_raw, price, symbol, niveles=None):
         f"<b>Precio:</b> <code>{price}</code>\n"
         f"<b>Símbolo:</b> <code>{symbol}</code>\n"
     )
-    # Solo si es confirmada, agrega TP/SL visualmente
     if niveles:
         message += "\n<b>Take Profit / Stop Loss:</b>\n"
         message += formato_tps_sl(niveles)
-    
-    # Print para depuración
-    print(f"TELEGRAM_CHAT_ID: '{TELEGRAM_CHAT_ID}' (type: {type(TELEGRAM_CHAT_ID)})")
-    print(f"TELEGRAM_TOKEN: '{TELEGRAM_TOKEN[:10]}...'")  # No muestres el token completo en producción
-    print("Mensaje enviado a Telegram:")
-    print(message)
-    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": str(TELEGRAM_CHAT_ID),  # Asegura que sea str
         "text": message,
         "parse_mode": "HTML"
     }
-    r = requests.post(url, data=data)
-    print("Respuesta de Telegram:", r.text)
+    try:
+        r = requests.post(url, data=data)
+        print("Respuesta de Telegram:", r.text)
+    except Exception as e:
+        print("ERROR enviando a Telegram:", e)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -93,7 +100,6 @@ def webhook():
     tipo = classify_signal(signal)
     niveles = None
 
-    # Solo calcula TP/SL si es confirmada
     if tipo == "CONFIRMADA_BUY":
         niveles = calcular_tps_sl(price, TPS, SL_BUY, side="buy")
     elif tipo == "CONFIRMADA_SELL":
@@ -106,13 +112,12 @@ def webhook():
 def root():
     return "¡Bot de Trading activo!"
 
-# Ruta de prueba para ver si el envío a Telegram funciona (accede a /test_telegram en tu navegador)
+# Endpoint para probar si se pueden enviar mensajes
 @app.route("/test_telegram", methods=["GET"])
 def test_telegram():
-    result = send_telegram_message(
-        "CONFIRMADA_BUY", "PRUEBA TEST", 1234, "XAUUSD", None
-    )
-    return "Prueba enviada a Telegram (revisa logs y tu chat)."
+    print("DEBUG: /test_telegram called")
+    send_telegram_message("CONFIRMADA_BUY", "PRUEBA TEST", 1234, "XAUUSD", None)
+    return "Mensaje de prueba enviado (revisa logs y Telegram)"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
