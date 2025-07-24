@@ -1,14 +1,19 @@
-from flask import Flask, request, jsonify
 import os
+
+# === BLOQUE DE DIAGNÓSTICO: imprime variables de entorno relevantes ===
+print("========== DEBUG INICIO ==========")
+for k, v in os.environ.items():
+    if "TOKEN" in k or "CHAT" in k or "TELE" in k or "PRUEBA" in k:
+        print(f"{k} = {repr(v)}")
+print("========== FIN DEBUG ==========")
+
+from flask import Flask, request, jsonify
 import requests
 
 app = Flask(__name__)
 
-# Debug: Verifica que se carguen las variables de entorno
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-print("DEBUG: TELEGRAM_TOKEN:", TELEGRAM_TOKEN[:10] if TELEGRAM_TOKEN else None)
-print("DEBUG: TELEGRAM_CHAT_ID:", TELEGRAM_CHAT_ID)
 
 # Configuración de TP y SL (porcentaje)
 TPS = [0.2, 0.5, 1, 2, 3, 5]  # TP1 a TP6 (%)
@@ -30,7 +35,10 @@ def classify_signal(signal_text):
 
 def calcular_tps_sl(price, tps, sl, side="buy"):
     niveles = {}
-    price = float(price)
+    try:
+        price = float(price)
+    except Exception:
+        return niveles
     if side == "buy":
         for i, tp in enumerate(tps, 1):
             niveles[f"TP{i}"] = round(price * (1 + tp / 100), 2)
@@ -91,7 +99,6 @@ def webhook():
     tipo = classify_signal(signal)
     niveles = None
 
-    # Solo calcula TP/SL si es confirmada
     if tipo == "CONFIRMADA_BUY":
         niveles = calcular_tps_sl(price, TPS, SL_BUY, side="buy")
     elif tipo == "CONFIRMADA_SELL":
@@ -104,12 +111,18 @@ def webhook():
 def root():
     return "¡Bot de Trading activo!"
 
+# Endpoint para ver variables desde el navegador
+@app.route("/verifica_vars", methods=["GET"])
+def verifica_vars():
+    return {
+        "TELEGRAM_TOKEN": os.environ.get("TELEGRAM_TOKEN"),
+        "TELEGRAM_CHAT_ID": os.environ.get("TELEGRAM_CHAT_ID")
+    }
+
+# Endpoint para probar mensaje Telegram (opcional)
 @app.route("/test_telegram", methods=["GET"])
 def test_telegram():
     print("DEBUG: /test_telegram called")
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("ERROR: Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID")
-        return "Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID", 500
     send_telegram_message("CONFIRMADA_BUY", "PRUEBA TEST", 1234, "XAUUSD", None)
     return "Mensaje de prueba enviado (revisa logs y Telegram)"
 
