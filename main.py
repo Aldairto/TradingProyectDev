@@ -64,24 +64,45 @@ def webhook():
             print("Error al convertir price a float:", e)
             price = 0
         symbol = data.get("symbol", "???")
-        if price > 0 and side in ["buy", "sell"]:
-            sl = SL_BUY if side == "buy" else SL_SELL
-            niveles = calcular_tps_sl(price, TPS, sl, side)
-            emoji = "📈" if side == "buy" else "📉"
-            msg = f"""{emoji} Nueva señal Infinity Algo ({side.upper()}) en {symbol}
-• Precio de entrada: {price}
-• TP1: {niveles['TP1']}
-• TP2: {niveles['TP2']}
-• TP3: {niveles['TP3']}
-• TP4: {niveles['TP4']}
-• TP5: {niveles['TP5']}
-• TP6: {niveles['TP6']}
-• SL: {niveles['SL']}
+        
+        # Nuevo: Soporta tus nombres de señales personalizados
+        if price > 0:
+            # Señales confirmadas (calcula TP/SL)
+            if "buy/compra normal" in side:
+                sl = SL_BUY
+                niveles = calcular_tps_sl(price, TPS, sl, side="buy")
+                emoji = "📈"
+                tipo = "COMPRA CONFIRMADA"
+            elif "sell/venta normal" in side:
+                sl = SL_SELL
+                niveles = calcular_tps_sl(price, TPS, sl, side="sell")
+                emoji = "📉"
+                tipo = "VENTA CONFIRMADA"
+            # Señales potenciales (solo aviso)
+            elif "posible buy" in side:
+                emoji = "🟡"
+                tipo = "POSIBLE COMPRA"
+                niveles = None
+            elif "posible sell" in side:
+                emoji = "🟠"
+                tipo = "POSIBLE VENTA"
+                niveles = None
+            else:
+                emoji = "❓"
+                tipo = "SEÑAL DESCONOCIDA"
+                niveles = None
+
+            # Mensaje formateado
+            msg = f"""{emoji} <b>{tipo}</b> en {symbol}
+• Precio de entrada: <b>{price}</b>
 """
+            if niveles:
+                for i in range(1, 7):
+                    msg += f"🎯 TP{i}: {niveles[f'TP{i}']}\n"
+                msg += f"🛡️ SL: {niveles['SL']}\n"
         else:
             msg = f"Alerta TradingView:\n{data}"
     else:
-        # Si no es JSON, es texto plano
         msg = f"Alerta TradingView (mensaje simple):\n{data}"
 
     threading.Thread(target=send_telegram_message, args=(msg,)).start()
