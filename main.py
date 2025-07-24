@@ -4,12 +4,17 @@ import os
 import threading
 from dotenv import load_dotenv
 
+# Carga el .env si lo ejecutas localmente (en Railway no es necesario)
 load_dotenv()
 
 app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Debug: Imprime variables para asegurarte que Railway las lee
+print("TELEGRAM_TOKEN:", TELEGRAM_TOKEN)
+print("CHAT_ID:", CHAT_ID)
 
 # Configuración de niveles TP y SL
 TPS = [0.2, 0.5, 1, 2, 3, 5]  # TP1-TP6 (%)
@@ -44,7 +49,6 @@ def webhook():
     data = request.json
     print("Alerta recibida:", data)
 
-    # Normaliza el signal
     signal_raw = data.get("signal", "").lower().strip()
     price = data.get("price", 0)
     try:
@@ -56,7 +60,6 @@ def webhook():
 
     msg = None
 
-    # Analiza el tipo de señal
     if "posible buy" in signal_raw:
         emoji = "🔵"
         msg = f"""{emoji} <b>POSIBLE BUY</b> detectado en {symbol}
@@ -102,6 +105,12 @@ def webhook():
 
     threading.Thread(target=send_telegram_message, args=(msg,)).start()
     return jsonify({"status": "ok"})
+
+@app.route("/prueba_telegram", methods=["GET"])
+def prueba_telegram():
+    mensaje = "✅ <b>Prueba exitosa:</b> tu bot y variables de entorno funcionan correctamente."
+    response = send_telegram_message(mensaje)
+    return jsonify({"result": response})
 
 if __name__ == "__main__":
     app.run(port=5000, host="0.0.0.0")
