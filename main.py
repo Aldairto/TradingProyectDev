@@ -44,21 +44,36 @@ def webhook():
     data = request.json
     print("Alerta recibida:", data)
 
-    if isinstance(data, dict):
-        side = data.get("signal", "").lower()
-        price = data.get("price", 0)
-        print("Campo 'price' recibido:", price, type(price))
-        try:
-            price = float(price)
-        except Exception as e:
-            print("Error al convertir price a float:", e)
-            price = 0
-        symbol = data.get("symbol", "???")
-        if price > 0 and side in ["buy", "sell"]:
-            sl = SL_BUY if side == "buy" else SL_SELL
-            niveles = calcular_tps_sl(price, TPS, sl, side)
-            emoji = "📈" if side == "buy" else "📉"
-            msg = f"""{emoji} Nueva señal Infinity Algo ({side.upper()}) en {symbol}
+    # Normaliza el signal
+    signal_raw = data.get("signal", "").lower().strip()
+    price = data.get("price", 0)
+    try:
+        price = float(price)
+    except Exception as e:
+        print("Error al convertir price a float:", e)
+        price = 0
+    symbol = data.get("symbol", "???")
+
+    msg = None
+
+    # Analiza el tipo de señal
+    if "posible buy" in signal_raw:
+        emoji = "🔵"
+        msg = f"""{emoji} <b>POSIBLE BUY</b> detectado en {symbol}
+• Precio observado: {price}
+(Revisa confirmación antes de operar)
+"""
+    elif "posible sell" in signal_raw:
+        emoji = "🟠"
+        msg = f"""{emoji} <b>POSIBLE SELL</b> detectado en {symbol}
+• Precio observado: {price}
+(Revisa confirmación antes de operar)
+"""
+    elif "buy" in signal_raw:
+        sl = SL_BUY
+        niveles = calcular_tps_sl(price, TPS, sl, "buy")
+        emoji = "📈"
+        msg = f"""{emoji} <b>COMPRA (BUY)</b> en {symbol}
 • Precio de entrada: {price}
 • TP1: {niveles['TP1']}
 • TP2: {niveles['TP2']}
@@ -68,11 +83,22 @@ def webhook():
 • TP6: {niveles['TP6']}
 • SL: {niveles['SL']}
 """
-        else:
-            msg = f"Alerta TradingView:\n{data}"
+    elif "sell" in signal_raw:
+        sl = SL_SELL
+        niveles = calcular_tps_sl(price, TPS, sl, "sell")
+        emoji = "📉"
+        msg = f"""{emoji} <b>VENTA (SELL)</b> en {symbol}
+• Precio de entrada: {price}
+• TP1: {niveles['TP1']}
+• TP2: {niveles['TP2']}
+• TP3: {niveles['TP3']}
+• TP4: {niveles['TP4']}
+• TP5: {niveles['TP5']}
+• TP6: {niveles['TP6']}
+• SL: {niveles['SL']}
+"""
     else:
-        # Si no es JSON, es texto plano
-        msg = f"Alerta TradingView (mensaje simple):\n{data}"
+        msg = f"Alerta TradingView:\n{data}"
 
     threading.Thread(target=send_telegram_message, args=(msg,)).start()
     return jsonify({"status": "ok"})
