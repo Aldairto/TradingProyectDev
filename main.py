@@ -4,13 +4,11 @@ import requests
 
 app = Flask(__name__)
 
-# Cargar variables de entorno de forma segura
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-# DEBUG: Verifica si las variables llegan
-print("DEBUG >>> TELEGRAM_TOKEN vacío:", not bool(TELEGRAM_TOKEN))
-print("DEBUG >>> TELEGRAM_CHAT_ID vacío:", not bool(TELEGRAM_CHAT_ID))
+# Debug: Verifica que se carguen las variables de entorno
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+print("DEBUG: TELEGRAM_TOKEN:", TELEGRAM_TOKEN[:10] if TELEGRAM_TOKEN else None)
+print("DEBUG: TELEGRAM_CHAT_ID:", TELEGRAM_CHAT_ID)
 
 # Configuración de TP y SL (porcentaje)
 TPS = [0.2, 0.5, 1, 2, 3, 5]  # TP1 a TP6 (%)
@@ -32,10 +30,7 @@ def classify_signal(signal_text):
 
 def calcular_tps_sl(price, tps, sl, side="buy"):
     niveles = {}
-    try:
-        price = float(price)
-    except Exception:
-        return niveles
+    price = float(price)
     if side == "buy":
         for i, tp in enumerate(tps, 1):
             niveles[f"TP{i}"] = round(price * (1 + tp / 100), 2)
@@ -55,11 +50,9 @@ def formato_tps_sl(niveles):
     return tp_lines
 
 def send_telegram_message(tipo, signal_raw, price, symbol, niveles=None):
-    # Validar que las variables están presentes
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("ERROR: Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID")
-        return
-
+        return False
     tipo_map = {
         "CONFIRMADA_BUY": "🟢 COMPRA CONFIRMADA",
         "CONFIRMADA_SELL": "🔴 VENTA CONFIRMADA",
@@ -80,15 +73,13 @@ def send_telegram_message(tipo, signal_raw, price, symbol, niveles=None):
         message += formato_tps_sl(niveles)
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {
-        "chat_id": str(TELEGRAM_CHAT_ID),  # Asegura que sea str
+        "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "HTML"
     }
-    try:
-        r = requests.post(url, data=data)
-        print("Respuesta de Telegram:", r.text)
-    except Exception as e:
-        print("ERROR enviando a Telegram:", e)
+    r = requests.post(url, data=data)
+    print("Respuesta de Telegram:", r.text)
+    return r.ok
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -100,6 +91,7 @@ def webhook():
     tipo = classify_signal(signal)
     niveles = None
 
+    # Solo calcula TP/SL si es confirmada
     if tipo == "CONFIRMADA_BUY":
         niveles = calcular_tps_sl(price, TPS, SL_BUY, side="buy")
     elif tipo == "CONFIRMADA_SELL":
@@ -112,10 +104,12 @@ def webhook():
 def root():
     return "¡Bot de Trading activo!"
 
-# Endpoint para probar si se pueden enviar mensajes
 @app.route("/test_telegram", methods=["GET"])
 def test_telegram():
     print("DEBUG: /test_telegram called")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("ERROR: Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID")
+        return "Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID", 500
     send_telegram_message("CONFIRMADA_BUY", "PRUEBA TEST", 1234, "XAUUSD", None)
     return "Mensaje de prueba enviado (revisa logs y Telegram)"
 
