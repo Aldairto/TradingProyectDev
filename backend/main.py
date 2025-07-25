@@ -2,22 +2,16 @@ from flask import Flask, request, jsonify
 import requests
 import os
 import threading
-
-# No uses dotenv en Railway en producción: Railway ya inyecta las variables.
-# Si quieres usarlo local, puedes descomentar estas líneas:
-# from dotenv import load_dotenv
-# load_dotenv()
+from db import insert_order   # <-- Importa la función de db.py
 
 app = Flask(__name__)
 
-# Lee variables de entorno directo del sistema
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Configuración de niveles TP y SL
 TPS = [0.2, 0.5, 1, 2, 3, 5]  # TP1-TP6 (%)
-SL_BUY = 0.40                  # SL para compras (%)
-SL_SELL = 0.40                 # SL para ventas (%)
+SL_BUY = 0.40
+SL_SELL = 0.40
 
 def calcular_tps_sl(price, tps, sl, side="buy"):
     niveles = {}
@@ -57,16 +51,18 @@ def webhook():
     if isinstance(data, dict):
         side = data.get("signal", "").lower()
         price = data.get("price", 0)
-        print("Campo 'price' recibido:", price, type(price))
         try:
             price = float(price)
         except Exception as e:
             print("Error al convertir price a float:", e)
             price = 0
         symbol = data.get("symbol", "???")
-        
-        # Nuevo: Soporta tus nombres de señales personalizados
+
+        # Guarda en MySQL
         if price > 0:
+            # Usa "order_type" como columna
+            threading.Thread(target=insert_order, args=(side, price, symbol)).start()
+
             # Señales confirmadas (calcula TP/SL)
             if "buy/compra normal" in side:
                 sl = SL_BUY
@@ -78,7 +74,6 @@ def webhook():
                 niveles = calcular_tps_sl(price, TPS, sl, side="sell")
                 emoji = "📉"
                 tipo = "VENTA CONFIRMADA"
-            # Señales potenciales (solo aviso)
             elif "posible buy" in side:
                 emoji = "🟡"
                 tipo = "POSIBLE COMPRA"
@@ -92,7 +87,6 @@ def webhook():
                 tipo = "SEÑAL DESCONOCIDA"
                 niveles = None
 
-            # Mensaje formateado
             msg = f"""{emoji} <b>{tipo}</b> en {symbol}
 • Precio de entrada: <b>{price}</b>
 """
@@ -108,14 +102,9 @@ def webhook():
     threading.Thread(target=send_telegram_message, args=(msg,)).start()
     return jsonify({"status": "ok"})
 
-# Endpoint de prueba para variables de entorno (recuerda eliminarlo después)
-@app.route('/envtest')
-def envtest():
-    return f"TOKEN: {repr(TELEGRAM_TOKEN)} | CHAT_ID: {repr(CHAT_ID)}"
-
 @app.route("/")
 def index():
-    return "¡Bot de Trading activo! Versión Railway."
+    return "¡Bot de Trading activo! Versión Railway + MySQL"
 
 if __name__ == "__main__":
     app.run(port=5000, host="0.0.0.0")

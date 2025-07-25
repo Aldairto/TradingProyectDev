@@ -2,7 +2,6 @@
 data/
 
 # Archivos de entorno y variables sensibles
-.env
 
 # Python cache
 __pycache__/
@@ -18,4 +17,9 @@ __pycache__/
 *.ipynb_checkpoints/
 
 # Otros (ajusta según uses)
-.DS_Store
+# Ignorar archivos sensibles locales
+executor_mt5/.env
+backend/.env
+*.pyc
+__pycache__/
+.env
