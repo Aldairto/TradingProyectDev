@@ -1,142 +1,317 @@
-# mt5_executor.py
-import MetaTrader5 as mt5
-import time
+# -*- coding: utf-8 -*-
 import os
-import mysql.connector
-from dotenv import load_dotenv
+import sys
+import time
+import threading
 from datetime import datetime
-from mt5_utils import calcular_tps, cerrar_posiciones_hasta_vacio, validar_tp_vs_stop_level
 
-# Carga variables de entorno
-load_dotenv()
+import requests
+import MetaTrader5 as mt5
 
-# MySQL
-MYSQL_HOST = os.getenv('MYSQL_HOST')
-MYSQL_PORT = int(os.getenv('MYSQL_PORT', 3306))
-MYSQL_USER = os.getenv('MYSQL_USER')
-MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
-MYSQL_DATABASE = os.getenv('MYSQL_DATABASE')
+# === Dependencias del proyecto ===
+sys.path.append("../backend")
+from db import insertar_ejecucion, get_pending_orders, update_order_status
+from mt5_utils import cerrar_posiciones_hasta_vacio, calcular_tps_porcentaje
 
-# MT5
-MT5_LOGIN = int(os.getenv('MT5_LOGIN'))
-MT5_PASSWORD = os.getenv('MT5_PASSWORD')
-MT5_SERVER = os.getenv('MT5_SERVER')
-MT5_PATH = os.getenv('MT5_PATH')
+# ================== CONFIG ==================
+SYMBOL_MAP = {"XAUUSD": "GOLD"}
 
-MAGIC = 20240725
-TPS = [0.2, 0.5, 1, 2, 3, 5]
+TPS_PERCENT = [0.2, 0.5, 1, 2, 3, 5]   # TPs en %
+VOLUMES     = [0.03, 0.02, 0.01]       # lotes por parcial
+SL_PERCENT  = 10.0                     # SL en %
 
-def obtener_ordenes_pendientes():
-    conn = mysql.connector.connect(
-        host=MYSQL_HOST,
-        port=MYSQL_PORT,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE
-    )
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM orders WHERE status = 'pending' ORDER BY id ASC")
-    ordenes = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return ordenes
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-def actualizar_status_orden(orden_id, status):
-    conn = mysql.connector.connect(
-        host=MYSQL_HOST,
-        port=MYSQL_PORT,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE
-    )
-    cursor = conn.cursor()
-    cursor.execute("UPDATE orders SET status = %s WHERE id = %s", (status, orden_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
+USE_MT5_AUTOTRADING = os.getenv("USE_MT5_AUTOTRADING", "true").lower() == "true"
 
-def ejecutar_orden(orden):
-    symbol = orden['symbol'].upper()
-    if symbol == "XAUUSD":
-        symbol = "GOLD"
-    tipo_orden = orden['order_type'].lower()
-    price = float(str(orden['price']).replace(',', '.'))
-    lot = 0.1
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
+AUTO_MODE_FILE = os.getenv("AUTO_MODE_FILE") or os.path.join(BASE_DIR, "auto_mode.flag")
+AUTO_MODE_ENV_DEFAULT = os.getenv("AUTO_MODE", "false").lower() == "true"
 
-    if "buy" in tipo_orden:
-        print(f"[LOG] Cerrar posiciones SELL antes de abrir BUY...")
-        if not cerrar_posiciones_hasta_vacio(symbol, tipo=mt5.POSITION_TYPE_SELL):
-            print("[ERROR] No se pudieron cerrar todas las SELL. Aborto ejecución.")
-            return False
-        order_type = mt5.ORDER_TYPE_BUY
-    elif "sell" in tipo_orden:
-        print(f"[LOG] Cerrar posiciones BUY antes de abrir SELL...")
-        if not cerrar_posiciones_hasta_vacio(symbol, tipo=mt5.POSITION_TYPE_BUY):
-            print("[ERROR] No se pudieron cerrar todas las BUY. Aborto ejecución.")
-            return False
-        order_type = mt5.ORDER_TYPE_SELL
-    else:
-        print(f"[ERROR] Tipo de orden desconocido: {tipo_orden}")
+EXPECTED_MT5_LOGIN   = os.getenv("EXPECTED_MT5_LOGIN")
+STRICT_ACCOUNT_CHECK = os.getenv("STRICT_ACCOUNT_CHECK", "true").lower() == "true"
+
+DEFAULT_SYMBOL = SYMBOL_MAP.get("XAUUSD", "GOLD")
+
+OFF_ALERT_INTERVAL_SEC = int(os.getenv("OFF_ALERT_INTERVAL_SEC", "900"))  # 15 min
+_last_off_alert_ts = 0
+
+_prev_auto_mode = None
+# =============================================
+
+
+# --------------- Utilidades ---------------
+def enviar_mensaje_telegram(texto: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": texto}, timeout=8
+        )
+    except Exception as e:
+        print(f"[ERROR] Telegram: {e}")
+
+def notificador_activo():
+    while True:
+        enviar_mensaje_telegram("🤖 Activo")
+        time.sleep(1800)  # 30 min
+
+def _fmt(n):
+    try:
+        return f"{float(n):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    except:
+        return str(n)
+
+
+# --------- Lectura de AUTO_MODE ----------
+def _from_mt5_auto_mode():
+    try:
+        term = mt5.terminal_info()
+        if term is None:
+            return None, "mt5", "no-terminal-info"
+        val = bool(getattr(term, "trade_allowed", False))
+        return val, "mt5", f"trade_allowed={val}"
+    except Exception as e:
+        return None, "mt5", f"error:{e}"
+
+def _from_file_auto_mode():
+    try:
+        if os.path.isfile(AUTO_MODE_FILE):
+            raw = open(AUTO_MODE_FILE, "r", encoding="utf-8", errors="ignore").read().strip().lower()
+            if "on" in raw or raw in ("1", "true", "yes", "activo", "active"):
+                return True, "file", raw
+            if "off" in raw or raw in ("0", "false", "no", "inactivo"):
+                return False, "file", raw
+            return False, "file", raw
+        return None, "file", "missing"
+    except Exception as e:
+        return None, "file", f"error:{e}"
+
+def leer_auto_mode():
+    if USE_MT5_AUTOTRADING:
+        val, src, det = _from_mt5_auto_mode()
+        if val is not None:
+            return val, src, det
+    val, src, det = _from_file_auto_mode()
+    if val is not None:
+        return val, src, det
+    return AUTO_MODE_ENV_DEFAULT, "env", str(AUTO_MODE_ENV_DEFAULT)
+
+
+# --------- Chequeo de símbolo ----------
+def _symbol_trading_status(symbol: str):
+    try:
+        info = mt5.symbol_info(symbol)
+        if not info or not info.visible:
+            mt5.symbol_select(symbol, True)
+            info = mt5.symbol_info(symbol)
+        if not info:
+            return False, "no-symbol-info"
+
+        ok_modes = set()
+        for name in ("SYMBOL_TRADE_MODE_FULL", "SYMBOL_TRADE_MODE_LONGONLY", "SYMBOL_TRADE_MODE_SHORTONLY"):
+            if hasattr(mt5, name):
+                ok_modes.add(getattr(mt5, name))
+        tm = getattr(info, "trade_mode", None)
+        allowed = tm in ok_modes if tm is not None else True
+        return allowed, f"trade_mode={tm}"
+    except Exception as e:
+        return False, f"error:{e}"
+
+
+# --------- Mensajes ultra-cortos ----------
+def _msg_off(src: str) -> str:
+    if src == "mt5":
+        return "⏸️ Bot en pausa (AutoTrading OFF). Actívalo en MT5 (Ctrl+E)"
+    if src == "file":
+        return f'⏸️ Bot en pausa (flag OFF). Escribe "on" en auto_mode.flag'
+    return "⏸️ Bot en pausa (config OFF). AUTO_MODE=true"
+
+def _msg_on() -> str:
+    return "✅ AutoTrading ON — ejecutando"
+
+
+def _recordatorio_off_si_corresponde(src: str):
+    global _last_off_alert_ts
+    now = time.time()
+    if now - _last_off_alert_ts >= OFF_ALERT_INTERVAL_SEC:
+        enviar_mensaje_telegram(_msg_off(src))
+        _last_off_alert_ts = now
+
+
+# --------- Helpers de tipos ----------
+def _es_alerta_informativa(t_upper: str) -> bool:
+    """'POSIBLE BUY/SELL' y 'TAKE PROFIT *' no ejecutan órdenes."""
+    if "POSIBLE BUY" in t_upper or "POSIBLE SELL" in t_upper:
+        return True
+    if "TAKE PROFIT" in t_upper:
+        return True
+    return False
+
+
+# --------------- Startup checks ---------------
+def startup_checks() -> bool:
+    term = mt5.terminal_info()
+    acc  = mt5.account_info()
+    if term is None or acc is None:
+        enviar_mensaje_telegram("❌ MT5 sin info de terminal/cuenta")
         return False
 
-    tick = mt5.symbol_info_tick(symbol)
-    if not tick:
-        print(f"[ERROR] No se pudo obtener tick para {symbol}.")
+    auto_mode, src, det = leer_auto_mode()
+    sym_ok, sym_det = _symbol_trading_status(DEFAULT_SYMBOL)
+
+    resumen_corto = (
+        f"🧪 Acc:{acc.login} | Bal:{_fmt(acc.balance)} | Eq:{_fmt(acc.equity)} | "
+        f"Auto:{'ON' if auto_mode else 'OFF'} ({src})"
+    )
+    print(resumen_corto)
+    enviar_mensaje_telegram(resumen_corto)
+
+    if EXPECTED_MT5_LOGIN:
+        ok_login = str(acc.login) == str(EXPECTED_MT5_LOGIN)
+        if not ok_login and STRICT_ACCOUNT_CHECK:
+            enviar_mensaje_telegram("❌ Cuenta no coincide. Abortando.")
+            return False
+
+    if not sym_ok:
+        print(f"[WARN] Símbolo {DEFAULT_SYMBOL} restringido ({sym_det})")
+
+    enviar_mensaje_telegram(_msg_on() if auto_mode else _msg_off(src))
+    return True
+
+
+# --------------- Ejecución de órdenes ---------------
+def ejecutar_orden(order: dict) -> bool:
+    symbol     = order["symbol"]
+    symbol_mt5 = SYMBOL_MAP.get(symbol, symbol)
+    order_type = order["order_type"]
+    price      = float(order["price"])
+    side       = "buy" if "buy" in order_type.lower() else "sell"
+
+    tps, sl = calcular_tps_porcentaje(price, TPS_PERCENT, SL_PERCENT, side=side)
+    tipo_mt5 = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
+
+    side_map = {
+        "BUY/COMPRA NORMAL O SMART": "buy",
+        "POSIBLE BUY": "buy",
+        "SELL/VENTA NORMAL O SMART": "sell",
+        "POSIBLE SELL": "sell",
+        # nuevos tipos informativos
+        "TAKE PROFIT BUY": "buy",
+        "TAKE PROFIT LONG": "buy",
+        "TAKE PROFIT SELL": "sell",
+        "TAKE PROFIT SHORT": "sell",
+        "buy": "buy", "sell": "sell"
+    }
+    side_db = side_map.get(order_type.upper(), order_type if order_type in ["buy", "sell"] else "buy")
+
+    opposite_type = mt5.POSITION_TYPE_SELL if side == "buy" else mt5.POSITION_TYPE_BUY
+    print(f"[LOG] Cerrando posiciones {'SELL' if opposite_type==1 else 'BUY'} antes de abrir {order_type.upper()}...")
+    if not cerrar_posiciones_hasta_vacio(symbol_mt5, tipo=opposite_type):
+        print("[CRÍTICO] No se lograron cerrar todas las posiciones.")
         return False
 
-    # Calcular y validar TP
-    tps = calcular_tps(price, TPS)
-    tps_validos = validar_tp_vs_stop_level(symbol, tps, order_type)
+    success = False
+    for i, (tp, volume) in enumerate(zip(tps, VOLUMES), 1):
+        tick = mt5.symbol_info_tick(symbol_mt5)
+        if not tick:
+            print("[ERROR] Sin tick de símbolo.")
+            continue
 
-    ejecuciones = 0
-    for i, tp in enumerate(tps_validos):
-        print(f"[DEBUG] Ejecutando parcial {i+1}: {tipo_orden} {symbol} @ {price} | TP: {tp}")
+        price_exec = tick.ask if side == "buy" else tick.bid
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": round(lot / len(tps_validos), 2),
-            "type": order_type,
-            "price": tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid,
+            "symbol": symbol_mt5,
+            "volume": volume,
+            "type": tipo_mt5,
+            "price": price_exec,
+            "sl": sl,
             "tp": tp,
-            "magic": MAGIC,
-            "comment": f"TP parcial {i+1} auto",
+            "deviation": 10,
+            "magic": 20240725,
+            "comment": f"TP{i}",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC
         }
+
         result = mt5.order_send(request)
-        if result and hasattr(result, "retcode") and result.retcode == mt5.TRADE_RETCODE_DONE:
-            print(f"[OK] Parcial {i+1} ejecutada. Ticket: {getattr(result, 'order', 'N/A')}")
-            ejecuciones += 1
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+            print(f"[OK] Parcial {i} ejecutada. Ticket: {result.order}")
+            insertar_ejecucion(order.get("id"), result.order, symbol, side_db,
+                               volume, request["price"], tp, sl, now_str)
+            success = True
         else:
-            print(f"[ERROR] Parcial {i+1} no ejecutada: {getattr(result, 'retcode', 'SIN RESULTADO')} ({getattr(result, 'comment', 'NO DATA')}) result={result}")
+            print(f"[ERROR] Parcial {i} no ejecutada: {getattr(result, 'retcode', 'No result')} result={result}")
 
-    if ejecuciones > 0:
-        actualizar_status_orden(orden['id'], "executed")
-        print(f"[LOG] {ejecuciones} parciales ejecutadas. Status cambiado a 'executed'.")
+    if not success:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        insertar_ejecucion(order.get("id"), None, symbol, side_db,
+                           sum(VOLUMES), price, None, sl, now_str)
     else:
-        print(f"[LOG] Ninguna parcial ejecutada. El status sigue como 'pending'.")
-    return True
+        update_order_status(order.get("id"), "executed")
 
+    return success
+
+
+# ---------------------- MAIN ----------------------
 def main():
-    print("[LOG] Iniciando MT5 Executor...")
-    if not mt5.initialize(MT5_PATH, login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
-        print(f"[ERROR] No se pudo inicializar MT5: {mt5.last_error()}")
-        return
-    account_info = mt5.account_info()
-    if account_info:
-        print(f"[MTS] Conectado como {account_info.login}. Balance: {account_info.balance}.")
-    else:
-        print("[ERROR] No se pudo obtener información de cuenta MT5.")
+    global _prev_auto_mode, _last_off_alert_ts
 
+    print("[LOG] Iniciando MT5 Executor...")
+    if not mt5.initialize():
+        enviar_mensaje_telegram("❌ No se pudo iniciar MT5")
+        return
+
+    acc = mt5.account_info()
+    print(f"[MTS] Conectado como {acc.login if acc else 'N/A'}. Balance: {acc.balance if acc else 'N/A'}.")
+
+    if not startup_checks():
+        print("[CRÍTICO] Startup checks fallaron. Saliendo.")
+        return
+
+    threading.Thread(target=notificador_activo, daemon=True).start()
+
+    print("[LOG] Loop principal...")
     while True:
-        print("[LOG] Buscando órdenes pendientes en la base de datos...")
-        ordenes = obtener_ordenes_pendientes()
-        print(f"[LOG] Encontradas {len(ordenes)} órdenes pendientes.")
-        for orden in ordenes:
-            ejecutar_orden(orden)
-        print("[LOG] Ciclo terminado. Esperando 5 segundos...\n")
+        auto_mode, src, det = leer_auto_mode()
+
+        if _prev_auto_mode is None or _prev_auto_mode != auto_mode:
+            _prev_auto_mode = auto_mode
+            if auto_mode:
+                enviar_mensaje_telegram(_msg_on())
+                print(f"[MODO] ON  [src={src} det={det}]")
+            else:
+                enviar_mensaje_telegram(_msg_off(src))
+                _last_off_alert_ts = time.time()
+                print(f"[MODO] OFF [src={src} det={det}]")
+
+        if not auto_mode:
+            _recordatorio_off_si_corresponde(src)
+            time.sleep(5)
+            continue
+
+        orders = get_pending_orders()
+        print(f"[LOG] Órdenes pendientes: {len(orders)}")
+        for order in orders:
+            t_upper = str(order["order_type"]).upper()
+
+            # --- NUEVO: manejar alertas informativas de TP y "Posible" ---
+            if _es_alerta_informativa(t_upper):
+                update_order_status(order.get("id"), "take_profit" if "TAKE PROFIT" in t_upper else "informativa")
+                enviar_mensaje_telegram(
+                    f"🎯 {t_upper} | {order.get('symbol')} @ {order.get('price')}"
+                )
+                print(f"[INFO] Alerta informativa detectada, no se ejecuta: {t_upper}")
+                continue
+            # -------------------------------------------------------------
+
+            ejecutar_orden(order)
+
         time.sleep(5)
+
 
 if __name__ == "__main__":
     main()

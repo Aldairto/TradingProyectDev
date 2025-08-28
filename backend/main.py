@@ -64,28 +64,41 @@ def webhook():
             threading.Thread(target=insert_order, args=(side, price, symbol)).start()
 
             # Señales confirmadas (calcula TP/SL)
-            if "buy/compra normal" in side:
-                sl = SL_BUY
-                niveles = calcular_tps_sl(price, TPS, sl, side="buy")
-                emoji = "📈"
-                tipo = "COMPRA CONFIRMADA"
-            elif "sell/venta normal" in side:
-                sl = SL_SELL
-                niveles = calcular_tps_sl(price, TPS, sl, side="sell")
-                emoji = "📉"
-                tipo = "VENTA CONFIRMADA"
-            elif "posible buy" in side:
-                emoji = "🟡"
-                tipo = "POSIBLE COMPRA"
-                niveles = None
-            elif "posible sell" in side:
-                emoji = "🟠"
-                tipo = "POSIBLE VENTA"
-                niveles = None
-            else:
-                emoji = "❓"
-                tipo = "SEÑAL DESCONOCIDA"
-                niveles = None
+                if "buy/compra normal" in side:
+                    sl = SL_BUY
+                    niveles = calcular_tps_sl(price, TPS, sl, side="buy")
+                    emoji = "📈"
+                    tipo = "COMPRA CONFIRMADA"
+
+                elif "sell/venta normal" in side:
+                    sl = SL_SELL
+                    niveles = calcular_tps_sl(price, TPS, sl, side="sell")
+                    emoji = "📉"
+                    tipo = "VENTA CONFIRMADA"
+
+                elif "posible buy" in side:
+                    emoji = "🟡"
+                    tipo = "POSIBLE COMPRA"
+                    niveles = None
+
+                elif "posible sell" in side:
+                    emoji = "🟠"
+                    tipo = "POSIBLE VENTA"
+                    niveles = None
+
+                elif "take profit buy" in side or "take profit long" in side:
+                    emoji = "🎯"
+                    tipo = "TAKE PROFIT BUY"
+                    niveles = None
+
+                elif "take profit sell" in side or "take profit short" in side:
+                    emoji = "🎯"
+                    tipo = "TAKE PROFIT SELL"
+                    niveles = None
+                else:
+                    emoji = "❓"
+                    tipo = "Signal Desconocida"
+                    niveles = None
 
             msg = f"""{emoji} <b>{tipo}</b> en {symbol}
 • Precio de entrada: <b>{price}</b>

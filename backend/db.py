@@ -1,6 +1,11 @@
+from dotenv import load_dotenv
 import mysql.connector
 import os
 from datetime import datetime
+
+# Si estás corriendo local, asegúrate de cargar el .env antes de esto:
+# from dotenv import load_dotenv
+# load_dotenv()
 
 # Lee los datos de conexión desde variables de entorno
 MYSQL_HOST = os.environ.get("MYSQL_HOST")
@@ -60,7 +65,7 @@ def update_order_status(order_id, new_status):
         print(f"[DB ERROR] Al actualizar estatus de orden: {e}")
 
 # ---------- OPERACIONES EN TABLA trades_log ----------
-def registrar_trade_abierto(order_id, ticket, symbol, side, volume, entry_price, tp, sl, open_time):
+def insertar_ejecucion(order_id, ticket, symbol, side, volume, entry_price, tp, sl, open_time):
     try:
         conn = get_db()
         cur = conn.cursor()
