@@ -1,32 +1,34 @@
+# backend/db.py
 from dotenv import load_dotenv
 import mysql.connector
 import os
 from datetime import datetime
 
-# En Railway no necesitas load_dotenv(), pero localmente ayuda:
+# Carga .env en local; en Railway usará Variables del servicio
 load_dotenv()
 
-# Conexión desde variables de entorno
-MYSQL_HOST = os.environ.get("MYSQL_HOST")
-MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
-MYSQL_USER = os.environ.get("MYSQL_USER")
-MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
-MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE")
+# Acepta nombres MYSQL_* o DB_* como fallback
+MYSQL_HOST     = os.getenv("MYSQL_HOST")     or os.getenv("DB_HOST")
+MYSQL_PORT     = int(os.getenv("MYSQL_PORT") or os.getenv("DB_PORT") or "3306")
+MYSQL_USER     = os.getenv("MYSQL_USER")     or os.getenv("DB_USER")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD") or os.getenv("DB_PASS") or os.getenv("DB_PASSWORD")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE") or os.getenv("DB_NAME")
 
 def get_db():
+    # Timeout corto para evitar 502 si la DB no responde
     return mysql.connector.connect(
         host=MYSQL_HOST,
         port=MYSQL_PORT,
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE
+        database=MYSQL_DATABASE,
+        connection_timeout=5,
     )
 
 # ---------- ORDERS ----------
 def insert_order(order_type, price, symbol, account_login=None, status='pending', source_order_id=None):
     """
-    Inserta UNA orden (útil si ya hiciste fan-out en Python).
-    Si prefieres fan-out en SQL: INSERT ... SELECT desde counts.enabled=1.
+    Inserta UNA orden. Úsala en fan-out (una por cada cuenta activa).
     """
     try:
         conn = get_db()
@@ -36,9 +38,10 @@ def insert_order(order_type, price, symbol, account_login=None, status='pending'
             INSERT INTO orders (order_type, price, symbol, account_login, status, source_order_id, created_at)
             VALUES (%s, %s, %s, %s, %s, %s, NOW())
             """,
-            (order_type, price, symbol, account_login, status, source_order_id)
+            (order_type, float(price), symbol, account_login, status, source_order_id)
         )
         conn.commit()
+        print(f"[DB] Orden -> acc:{account_login} {order_type} {symbol} @ {price} (status={status})")
     except Exception as e:
         print(f"[DB ERROR] insert_order: {e}")
     finally:
@@ -48,16 +51,16 @@ def insert_order(order_type, price, symbol, account_login=None, status='pending'
             pass
 
 def get_pending_orders(account_login: str):
-    """ Devuelve SOLO las órdenes 'pending' de ESTA cuenta (lo usa mt5_executor). """
+    """ Devuelve SOLO las órdenes 'pending' de ESA cuenta (lo usa mt5_executor). """
     try:
         conn = get_db()
         cur = conn.cursor(dictionary=True)
         cur.execute("""
             SELECT *
-            FROM orders
-            WHERE account_login = %s
-              AND status = 'pending'
-            ORDER BY created_at ASC
+              FROM orders
+             WHERE account_login = %s
+               AND status = 'pending'
+             ORDER BY created_at ASC
         """, (account_login,))
         rows = cur.fetchall()
         return rows
@@ -71,7 +74,7 @@ def get_pending_orders(account_login: str):
             pass
 
 def update_order_status(order_id: int, account_login: str, new_status: str):
-    """ Actualiza el estado de ESA orden para ESTA cuenta. """
+    """ Actualiza el estado de ESA orden para ESA cuenta. """
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -81,8 +84,9 @@ def update_order_status(order_id: int, account_login: str, new_status: str):
              WHERE id=%s AND account_login=%s
         """, (new_status, order_id, account_login))
         conn.commit()
+        print(f"[DB] order {order_id} acc {account_login} -> {new_status}")
     except Exception as e:
-        print(f"[DB ERROR] update_order_status({order_id},{account_login},{new_status}): {e}")
+        print(f"[DB ERROR] update_order_status: {e}")
     finally:
         try:
             cur.close(); conn.close()
@@ -91,6 +95,9 @@ def update_order_status(order_id: int, account_login: str, new_status: str):
 
 # --- cuentas activas (tabla counts) ---
 def get_active_counts():
+    """
+    Devuelve lista de account_login activos (enabled=1) de la tabla counts.
+    """
     try:
         conn = get_db()
         cur = conn.cursor(dictionary=True)
@@ -107,7 +114,7 @@ def get_active_counts():
             pass
 
 # ---------- TRADES LOG ----------
-def insertar_ejecucion(order_id, ticket, symbol, side, volume, entry_price, tp, sl, open_time):
+def registrar_trade_abierto(order_id, ticket, symbol, side, volume, entry_price, tp, sl, open_time):
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -116,8 +123,9 @@ def insertar_ejecucion(order_id, ticket, symbol, side, volume, entry_price, tp, 
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'open')
         """, (order_id, ticket, symbol, side, volume, entry_price, tp, sl, open_time))
         conn.commit()
+        print(f"[DB] Trade ABIERTO ticket {ticket} | {side} {symbol} @ {entry_price}")
     except Exception as e:
-        print(f"[DB ERROR] insertar_ejecucion: {e}")
+        print(f"[DB ERROR] registrar_trade_abierto: {e}")
     finally:
         try:
             cur.close(); conn.close()
@@ -134,6 +142,7 @@ def registrar_trade_cerrado(ticket, exit_price, close_time, comment=""):
              WHERE ticket=%s
         """, (exit_price, close_time, comment, ticket))
         conn.commit()
+        print(f"[DB] Trade CERRADO ticket {ticket} | exit {exit_price}")
     except Exception as e:
         print(f"[DB ERROR] registrar_trade_cerrado: {e}")
     finally:
@@ -149,14 +158,11 @@ def get_open_trades(symbol=None, side=None):
         query = "SELECT * FROM trades_log WHERE status='open'"
         params = []
         if symbol:
-            query += " AND symbol=%s"
-            params.append(symbol)
+            query += " AND symbol=%s"; params.append(symbol)
         if side:
-            query += " AND side=%s"
-            params.append(side)
+            query += " AND side=%s"; params.append(side)
         cur.execute(query, params)
-        rows = cur.fetchall()
-        return rows
+        return cur.fetchall()
     except Exception as e:
         print(f"[DB ERROR] get_open_trades: {e}")
         return []
@@ -166,5 +172,6 @@ def get_open_trades(symbol=None, side=None):
         except:
             pass
 
+# ---------- UTIL ----------
 def get_now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
