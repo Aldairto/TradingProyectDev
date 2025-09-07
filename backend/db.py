@@ -1,11 +1,14 @@
-# backend/db.py
-from dotenv import load_dotenv
-import mysql.connector
 import os
 from datetime import datetime
+import mysql.connector
 
-# Carga .env en local; en Railway usará Variables del servicio
-load_dotenv()
+# Carga .env solo si está disponible (en Railway no es necesario)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 
 # Acepta nombres MYSQL_* o DB_* como fallback
 MYSQL_HOST     = os.getenv("MYSQL_HOST")     or os.getenv("DB_HOST")
