@@ -51,28 +51,16 @@ def send_telegram_message(message: str):
         return None
 
 
-def _safe_parse_json_from_request(req) -> dict:
-    """Intenta parsear JSON; si falla usa el raw body como fallback."""
+def _parse_json_from_raw(raw_text: str) -> dict:
+    """Parsea JSON partiendo del raw (string). Evita re-leer el stream."""
     try:
-        data = req.get_json(silent=True)
-        if data is not None:
-            return data
+        return json.loads(raw_text)
     except Exception as e:
-        print("[WEBHOOK] get_json error:", e)
-
-    try:
-        raw = req.get_data(cache=False)
-        if not raw:
-            return {}
-        # intenta decodificar como UTF-8
-        decoded = raw.decode("utf-8", errors="ignore")
-        return json.loads(decoded)
-    except Exception as e:
-        print("[WEBHOOK] Fallback json.loads error:", e)
+        print("[WEBHOOK] json.loads error:", e)
         return {}
 
 
-def _process_signal_async(data):
+def _process_signal_async(data: dict):
     """Procesa la señal en segundo plano: normaliza, fan-out e informa a Telegram."""
     try:
         print("[WEBHOOK] data parseada:", data)
@@ -137,7 +125,8 @@ def _process_signal_async(data):
             except Exception as e:
                 print(f"[WEBHOOK] Error fan-out:", e)
         else:
-            print("[WEBHOOK] Payload incompleto. No se inserta:", {"signal": order_type_raw, "symbol": symbol, "price": price})
+            print("[WEBHOOK] Payload incompleto. No se inserta:",
+                  {"signal": order_type_raw, "symbol": symbol, "price": price})
 
     except Exception as e:
         print("[WEBHOOK] Error en procesamiento async:", e)
@@ -147,9 +136,15 @@ def _process_signal_async(data):
 def webhook():
     """Recibe la señal; responde de inmediato y procesa en background (evita 502)."""
     try:
-        raw = request.get_data(cache=False, as_text=True)
-        print("[WEBHOOK] raw body:", raw)
-        data = _safe_parse_json_from_request(request)
+        # ¡IMPORTANTE!: cache=True para NO consumir el stream (lo reutilizamos)
+        raw_text = request.get_data(cache=True, as_text=True)
+        print("[WEBHOOK] raw body:", raw_text)
+
+        # Usar primero get_json (si el header viene bien); si no, parsear el raw ya leído
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not data:
+            data = _parse_json_from_raw(raw_text)
+
         threading.Thread(target=_process_signal_async, args=(data,), daemon=True).start()
         return jsonify({"status": "ok"}), 200
     except Exception as e:
@@ -160,7 +155,7 @@ def webhook():
 # Utilidad de debug
 @app.post("/echo")
 def echo():
-    raw = request.get_data(cache=False, as_text=True)
+    raw = request.get_data(cache=True, as_text=True)
     return jsonify({"raw": raw})
 
 
