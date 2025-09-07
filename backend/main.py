@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 import requests
 import os
 import threading
-from db import insert_order, get_active_counts, get_db  # helpers en backend/db.py
 
 app = Flask(__name__)
 
@@ -45,14 +44,14 @@ def send_telegram_message(message: str):
 
 
 def _process_signal_async(data):
-    """Procesa la señal en segundo plano: normaliza, fan-out a cuentas e informa a Telegram."""
+    """Procesa la señal en segundo plano: normaliza, fan-out e informa a Telegram."""
     try:
         # 1) Normaliza el payload (no cambies las llaves que manda TradingView)
         order_type_raw = str((data or {}).get("signal", "")).strip()
         symbol_in      = str((data or {}).get("symbol", "")).strip()
         price_raw      = (data or {}).get("price", 0)
 
-        # Normaliza símbolo: "BINANCE:BTCUSDTPERP" -> "BTCUSDTPERP", corrige typo XUAUSD
+        # Normaliza símbolo: "BINANCE:BTCUSD" -> "BTCUSD", corrige typo XUAUSD
         symbol = symbol_in.split(":")[-1].upper()
         if symbol == "XUAUSD":
             symbol = "XAUUSD"
@@ -96,6 +95,9 @@ def _process_signal_async(data):
         # 3) Fan-out: inserta una orden 'pending' por CADA cuenta activa en counts
         if price > 0.0 and symbol and order_type_raw:
             try:
+                # Import perezoso para no romper el arranque de la app
+                from db import insert_order, get_active_counts
+
                 active_accounts = get_active_counts()
                 print(f"[WEBHOOK] Cuentas activas: {active_accounts}")
                 inserted = 0
@@ -160,6 +162,8 @@ def healthz():
 @app.get("/dbcheck")
 def dbcheck():
     try:
+        # Import perezoso para no romper /healthz si falla la DB
+        from db import get_db
         conn = get_db()
         conn.close()
         return {"db": "ok"}
