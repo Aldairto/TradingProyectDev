@@ -6,13 +6,73 @@ import json
 
 app = Flask(__name__)
 
-# Telegram (opcional)
+# ──────────────────────────────────────────────────────────────────────────────
+# Telegram: múltiples destinos (compat con single TOKEN/CHAT_ID)
+# ──────────────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+DESTINATIONS_ENV = os.environ.get("DESTINATIONS")  # '[{"token":"...","chat_id":"..."}, ...]'
 
 TPS = [0.2, 0.5, 1, 2, 3, 5]  # TP1-TP6 en %
 SL_BUY = 0.40
 SL_SELL = 0.40
+
+
+def _mask_token(tok: str, keep: int = 6) -> str:
+    try:
+        if not tok:
+            return ""
+        if len(tok) <= keep:
+            return "*" * len(tok)
+        return tok[:keep] + "…" + "*" * (max(0, len(tok) - keep - 1))
+    except Exception:
+        return "***"
+
+
+def _safe_json_loads(txt: str):
+    """
+    Carga JSON tolerante a comillas simples y espacios.
+    Si falla, devuelve None.
+    """
+    if not txt:
+        return None
+    try:
+        return json.loads(txt)
+    except Exception:
+        # Intento suave: reemplazar comillas simples por dobles
+        try:
+            fixed = txt.replace("'", '"')
+            return json.loads(fixed)
+        except Exception:
+            return None
+
+
+def get_telegram_destinations():
+    """
+    Devuelve lista de destinos [{'token': '...', 'chat_id': '...'}, ...]
+    Prioriza DESTINATIONS; si no existe, usa TELEGRAM_TOKEN + TELEGRAM_CHAT_ID.
+    """
+    dests = []
+    data = _safe_json_loads(DESTINATIONS_ENV)
+    if isinstance(data, list) and data:
+        for item in data:
+            tok = str(item.get("token", "")).strip()
+            cid = str(item.get("chat_id", "")).strip()
+            if tok and cid:
+                dests.append({"token": tok, "chat_id": cid})
+    # Fallback legacy
+    if not dests and TELEGRAM_TOKEN and CHAT_ID:
+        dests.append({"token": TELEGRAM_TOKEN.strip(), "chat_id": str(CHAT_ID).strip()})
+    return dests
+
+
+TELEGRAM_DESTINATIONS = get_telegram_destinations()
+if TELEGRAM_DESTINATIONS:
+    print("[TG] Destinos cargados:")
+    for i, d in enumerate(TELEGRAM_DESTINATIONS, 1):
+        print(f"   {i}) chat_id={d['chat_id']} token={_mask_token(d['token'])}")
+else:
+    print("[TG] Sin destinos: configura DESTINATIONS o TELEGRAM_TOKEN/TELEGRAM_CHAT_ID")
 
 
 def _to_float(x):
@@ -37,18 +97,35 @@ def calcular_tps_sl(price, tps, sl, side="buy"):
     return niveles
 
 
-def send_telegram_message(message: str):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("[TG] Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID (no se envía).")
-        return None
+def _send_one_telegram(token: str, chat_id: str, message: str):
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        r = requests.post(url, json={"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
-        print("[TG] Respuesta:", r.status_code, r.text)
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        r = requests.post(
+            url,
+            json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
+            timeout=10
+        )
+        print(f"[TG] -> chat_id={chat_id} status={r.status_code} resp={r.text[:200]}")
         return r.json()
     except Exception as e:
-        print("[TG] Error al enviar:", e)
+        print(f"[TG] Error chat_id={chat_id}:", e)
         return None
+
+
+def send_telegram_message(message: str):
+    """
+    Envía a TODOS los destinos definidos. Si no hay destinos, imprime aviso.
+    Esta función puede llamarse desde un thread de background.
+    """
+    if not TELEGRAM_DESTINATIONS:
+        print("[TG] No hay destinos configurados; no se envía.")
+        return None
+
+    results = []
+    for d in TELEGRAM_DESTINATIONS:
+        res = _send_one_telegram(d["token"], d["chat_id"], message)
+        results.append(res)
+    return results
 
 
 def _parse_json_from_raw(raw_text: str) -> dict:
@@ -103,7 +180,9 @@ def _process_signal_async(data: dict):
                     msg += f"🎯 TP{i}: {val}\n"
             if "SL" in niveles:
                 msg += f"🛡️ SL: {niveles['SL']}\n"
-        threading.Thread(target=send_telegram_message, args=(msg,), daemon=True).start()
+
+        # Enviar a todos los destinos (ya estamos en background)
+        send_telegram_message(msg)
 
         # 3) Fan-out a cuentas activas
         if price > 0.0 and symbol and order_type_raw:
